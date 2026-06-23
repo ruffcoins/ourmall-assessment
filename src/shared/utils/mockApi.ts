@@ -1,4 +1,4 @@
-import { Product, MasterOrder, VendorSubOrder, OrderLineItem, ItemStatus, Currency } from '../types';
+import { Product, MasterOrder, VendorSubOrder, OrderLineItem, ItemStatus, Currency, StockFilter } from '../types';
 import { database } from '../data/db';
 import { convertPrice } from './currency';
 
@@ -36,7 +36,6 @@ export function getProductCurrentPrice(product: Product, targetCurrency: Currenc
     }
   }
 
-  // Convert from product's native currency to the target currency
   const convertedPrice = convertPrice(finalPrice, targetCurrency, product.currency);
   
   return { 
@@ -51,11 +50,16 @@ export function deriveSubOrderStatus(items: OrderLineItem[]): ItemStatus {
   
   const statuses = items.map(i => i.status);
   
-  if (statuses.every(s => s === 'Cancelled')) return 'Cancelled';
+  if (statuses.every(s => s === 'Cancelled' || s === 'Returned')) {
+    return statuses.some(s => s === 'Returned') ? 'Returned' : 'Cancelled';
+  }
+  
   if (statuses.every(s => s === 'Delivered')) return 'Delivered';
   
-  const activeItems = items.filter(i => i.status !== 'Cancelled');
-  if (activeItems.length === 0) return 'Cancelled';
+  const activeItems = items.filter(i => i.status !== 'Cancelled' && i.status !== 'Returned');
+  if (activeItems.length === 0) {
+    return statuses.some(s => s === 'Returned') ? 'Returned' : 'Cancelled';
+  }
   
   const activeStatuses = activeItems.map(i => i.status);
   if (activeStatuses.every(s => s === 'Delivered')) return 'Delivered';
@@ -65,13 +69,22 @@ export function deriveSubOrderStatus(items: OrderLineItem[]): ItemStatus {
   return 'Pending';
 }
 
+
 export const mockApi = {
+  getProduct: async (id: string): Promise<Product | undefined> => {
+    await delay(300);
+    if (simulateApiFailure) {
+      throw new Error('Network Error: Failed to fetch product.');
+    }
+    return database.getProductById(id);
+  },
+
   fetchProducts: async (filters: {
     search?: string;
     category?: string;
     minPrice?: number;
     maxPrice?: number;
-    inStockOnly?: boolean;
+    stockStatus?: StockFilter;
     currency?: Currency;
     page: number;
     limit: number;
@@ -82,7 +95,7 @@ export const mockApi = {
     }
 
     const targetCurrency = filters.currency || 'EUR';
-    let products = [...database.getProducts()];
+    let products = database.getProducts().filter(p => p.stockCount > 0);
 
     if (filters.search) {
       const searchLower = filters.search.toLowerCase();
@@ -109,8 +122,8 @@ export const mockApi = {
       });
     }
 
-    if (filters.inStockOnly) {
-      products = products.filter(p => p.stockCount > 0);
+    if (filters.stockStatus === 'lowStock') {
+      products = products.filter(p => p.stockCount > 0 && p.stockCount <= 3);
     }
 
     const totalCount = products.length;
@@ -261,14 +274,29 @@ export const mockApi = {
     for (const vendorId of Object.keys(itemsByVendor)) {
       const vendorItems = itemsByVendor[vendorId];
       const subOrderId = `${masterOrderId}-VND-${vendorId.substring(7).toUpperCase()}`;
+      const vendorName = vendorItems[0]?.product.vendor.name || `Vendor ${vendorId}`;
 
-      const lineItems: OrderLineItem[] = vendorItems.map(vi => ({
-        productId: vi.product.id,
-        name: vi.product.name,
-        quantity: vi.quantity,
-        pricePerItem: vi.price,
-        status: 'Pending',
-      }));
+      const lineItems: OrderLineItem[] = vendorItems.map(vi => {
+        const { isDiscounted } = getProductCurrentPrice(vi.product, currency);
+        let promoCode: string | undefined = undefined;
+        if (isDiscounted && vi.product.discount) {
+          promoCode = vi.product.discount.type === 'percentage'
+            ? `${vi.product.discount.value}% OFF`
+            : `SAVE-${vi.product.discount.value}`;
+        }
+        const originalPrice = convertPrice(vi.product.basePrice, currency, vi.product.currency);
+
+        return {
+          productId: vi.product.id,
+          name: vi.product.name,
+          quantity: vi.quantity,
+          pricePerItem: vi.price,
+          originalPrice,
+          promoCode,
+          imageUrl: vi.product.imageUrl || '',
+          status: 'Pending',
+        };
+      });
 
       const subTotal = lineItems.reduce((acc, curr) => acc + curr.pricePerItem * curr.quantity, 0);
       grandTotal += subTotal;
@@ -276,6 +304,7 @@ export const mockApi = {
       vendorSubOrders.push({
         subOrderId,
         vendorId,
+        vendorName,
         items: lineItems,
         subTotal: Math.round(subTotal * 100) / 100,
         status: 'Pending',
@@ -292,6 +321,40 @@ export const mockApi = {
     };
 
     database.saveOrder(order);
+
+    // Simulate order status transition over 30 seconds
+    const simulateStatusUpdate = (nextStatus: 'Confirmed' | 'Shipped' | 'Delivered') => {
+      const currentOrder = database.getOrderById(masterOrderId);
+      if (!currentOrder) return;
+
+      let hasUpdates = false;
+      for (const subOrder of currentOrder.vendorSubOrders) {
+        if (subOrder.status === 'Cancelled' || subOrder.status === 'Returned') continue;
+
+        for (const item of subOrder.items) {
+          if (item.status === 'Cancelled' || item.status === 'Returned') continue;
+          item.status = nextStatus;
+          hasUpdates = true;
+        }
+
+        if (hasUpdates) {
+          subOrder.status = deriveSubOrderStatus(subOrder.items);
+        }
+      }
+
+      if (hasUpdates) {
+        database.saveOrder(currentOrder);
+        // Dynamic require breaks the circular dependency: mockApi → store → mockApi.
+        // A top-level import would cause a crash at startup due to module init order.
+        const { useStore } = require('../store/useStore');
+
+        useStore.getState().updateOrder({ ...currentOrder });
+      }
+    };
+
+    setTimeout(() => simulateStatusUpdate('Confirmed'), 3000);
+    setTimeout(() => simulateStatusUpdate('Shipped'), 6000);
+    setTimeout(() => simulateStatusUpdate('Delivered'), 10000);
 
     return order;
   },
@@ -321,11 +384,16 @@ export const mockApi = {
       throw new Error('Item not found in sub-order.');
     }
 
-    if (lineItem.status === 'Cancelled') {
+    if (lineItem.status === 'Cancelled' || lineItem.status === 'Returned') {
       return { order, refundedAmount: 0 };
     }
 
-    lineItem.status = 'Cancelled';
+    if (lineItem.status === 'Shipped') {
+      throw new Error('This item has been shipped and cannot be cancelled. You can request a return once it is delivered.');
+    }
+
+    const wasDelivered = lineItem.status === 'Delivered';
+    lineItem.status = wasDelivered ? 'Returned' : 'Cancelled';
     const refundedAmount = Math.round((lineItem.pricePerItem * lineItem.quantity) * 100) / 100;
 
     const product = database.getProductById(productId);
@@ -333,7 +401,7 @@ export const mockApi = {
       database.updateProductStock(productId, product.stockCount + lineItem.quantity);
     }
 
-    const activeItems = subOrder.items.filter(i => i.status !== 'Cancelled');
+    const activeItems = subOrder.items.filter(i => i.status !== 'Cancelled' && i.status !== 'Returned');
     const newSubTotal = activeItems.reduce((acc, curr) => acc + curr.pricePerItem * curr.quantity, 0);
     subOrder.subTotal = Math.round(newSubTotal * 100) / 100;
     
@@ -370,10 +438,13 @@ export const mockApi = {
     }
 
     let refundedAmount = 0;
+    let anyDelivered = false;
 
     for (const item of subOrder.items) {
-      if (item.status !== 'Cancelled') {
-        item.status = 'Cancelled';
+      if (item.status !== 'Cancelled' && item.status !== 'Returned') {
+        const wasDelivered = item.status === 'Delivered';
+        if (wasDelivered) anyDelivered = true;
+        item.status = wasDelivered ? 'Returned' : 'Cancelled';
         refundedAmount += item.pricePerItem * item.quantity;
         
         const product = database.getProductById(item.productId);
@@ -385,7 +456,7 @@ export const mockApi = {
 
     refundedAmount = Math.round(refundedAmount * 100) / 100;
     subOrder.subTotal = 0;
-    subOrder.status = 'Cancelled';
+    subOrder.status = anyDelivered ? 'Returned' : 'Cancelled';
 
     const newGrandTotal = order.vendorSubOrders.reduce((acc, curr) => acc + curr.subTotal, 0);
     order.grandTotal = Math.round(newGrandTotal * 100) / 100;
@@ -412,9 +483,12 @@ export const mockApi = {
     let refundedAmount = 0;
 
     for (const subOrder of order.vendorSubOrders) {
+      let anyDelivered = false;
       for (const item of subOrder.items) {
-        if (item.status !== 'Cancelled') {
-          item.status = 'Cancelled';
+        if (item.status !== 'Cancelled' && item.status !== 'Returned') {
+          const wasDelivered = item.status === 'Delivered';
+          if (wasDelivered) anyDelivered = true;
+          item.status = wasDelivered ? 'Returned' : 'Cancelled';
           refundedAmount += item.pricePerItem * item.quantity;
 
           const product = database.getProductById(item.productId);
@@ -424,7 +498,7 @@ export const mockApi = {
         }
       }
       subOrder.subTotal = 0;
-      subOrder.status = 'Cancelled';
+      subOrder.status = anyDelivered ? 'Returned' : 'Cancelled';
     }
 
     refundedAmount = Math.round(refundedAmount * 100) / 100;
