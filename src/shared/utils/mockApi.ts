@@ -1,6 +1,7 @@
 import { Product, MasterOrder, VendorSubOrder, OrderLineItem, ItemStatus, Currency, StockFilter } from '../types';
 import { database } from '../data/db';
 import { convertPrice } from './currency';
+import { PROMO_CODES } from './promoCodes';
 
 let simulateApiFailure = false;
 
@@ -47,25 +48,23 @@ export function getProductCurrentPrice(product: Product, targetCurrency: Currenc
 
 export function deriveSubOrderStatus(items: OrderLineItem[]): ItemStatus {
   if (items.length === 0) return 'Pending';
-  
+
   const statuses = items.map(i => i.status);
-  
+
   if (statuses.every(s => s === 'Cancelled' || s === 'Returned')) {
     return statuses.some(s => s === 'Returned') ? 'Returned' : 'Cancelled';
   }
-  
+
   if (statuses.every(s => s === 'Delivered')) return 'Delivered';
-  
-  const activeItems = items.filter(i => i.status !== 'Cancelled' && i.status !== 'Returned');
-  if (activeItems.length === 0) {
-    return statuses.some(s => s === 'Returned') ? 'Returned' : 'Cancelled';
-  }
-  
-  const activeStatuses = activeItems.map(i => i.status);
+
+  const activeStatuses = items
+    .filter(i => i.status !== 'Cancelled' && i.status !== 'Returned')
+    .map(i => i.status);
+
   if (activeStatuses.every(s => s === 'Delivered')) return 'Delivered';
   if (activeStatuses.some(s => s === 'Shipped')) return 'Shipped';
   if (activeStatuses.some(s => s === 'Confirmed')) return 'Confirmed';
-  
+
   return 'Pending';
 }
 
@@ -95,7 +94,17 @@ export const mockApi = {
     }
 
     const targetCurrency = filters.currency || 'EUR';
-    let products = database.getProducts().filter(p => p.stockCount > 0);
+    let products = database.getProducts();
+
+    // Stock status filter — applied before all other filters
+    if (filters.stockStatus === 'outOfStock') {
+      products = products.filter(p => p.stockCount === 0);
+    } else if (filters.stockStatus === 'lowStock') {
+      products = products.filter(p => p.stockCount > 0 && p.stockCount <= 3);
+    } else {
+      // 'all' and 'inStock': show only orderable products (original catalog default)
+      products = products.filter(p => p.stockCount > 0);
+    }
 
     if (filters.search) {
       const searchLower = filters.search.toLowerCase();
@@ -120,10 +129,6 @@ export const mockApi = {
         const { price } = getProductCurrentPrice(p, targetCurrency);
         return price <= filters.maxPrice!;
       });
-    }
-
-    if (filters.stockStatus === 'lowStock') {
-      products = products.filter(p => p.stockCount > 0 && p.stockCount <= 3);
     }
 
     const totalCount = products.length;
@@ -201,10 +206,13 @@ export const mockApi = {
       }
 
       if (priceChanged) {
-        warning = warning 
+        const priceIncreased = currentPrice > item.addedAtPrice;
+        warning = warning
           ? `${warning} Note: Price updated to ${currentPrice}.`
           : `Note: Price updated to ${currentPrice}.`;
-        isValid = false;
+        if (priceIncreased) {
+          isValid = false;
+        }
       }
 
       return {
@@ -229,7 +237,8 @@ export const mockApi = {
   checkout: async (
     userId: string,
     items: Array<{ productId: string; quantity: number }>,
-    currency: Currency = 'EUR'
+    currency: Currency = 'EUR',
+    promoCode?: string
   ): Promise<MasterOrder> => {
     await delay();
     if (simulateApiFailure) {
@@ -278,9 +287,9 @@ export const mockApi = {
 
       const lineItems: OrderLineItem[] = vendorItems.map(vi => {
         const { isDiscounted } = getProductCurrentPrice(vi.product, currency);
-        let promoCode: string | undefined = undefined;
+        let itemPromoCode: string | undefined = undefined;
         if (isDiscounted && vi.product.discount) {
-          promoCode = vi.product.discount.type === 'percentage'
+          itemPromoCode = vi.product.discount.type === 'percentage'
             ? `${vi.product.discount.value}% OFF`
             : `SAVE-${vi.product.discount.value}`;
         }
@@ -292,7 +301,7 @@ export const mockApi = {
           quantity: vi.quantity,
           pricePerItem: vi.price,
           originalPrice,
-          promoCode,
+          promoCode: itemPromoCode,
           imageUrl: vi.product.imageUrl || '',
           status: 'Pending',
         };
@@ -311,12 +320,17 @@ export const mockApi = {
       });
     }
 
+    const promoDiscount = promoCode === PROMO_CODES.WELCOME10.code
+      ? Math.round(grandTotal * (PROMO_CODES.WELCOME10.discountPercent / 100) * 100) / 100
+      : 0;
+
     const order: MasterOrder = {
       masterOrderId,
       userId,
       currency,
       vendorSubOrders,
-      grandTotal: Math.round(grandTotal * 100) / 100,
+      grandTotal: Math.round((grandTotal - promoDiscount) * 100) / 100,
+      promoDiscount,
       createdAt: new Date().toISOString(),
     };
 
@@ -394,7 +408,18 @@ export const mockApi = {
 
     const wasDelivered = lineItem.status === 'Delivered';
     lineItem.status = wasDelivered ? 'Returned' : 'Cancelled';
-    const refundedAmount = Math.round((lineItem.pricePerItem * lineItem.quantity) * 100) / 100;
+
+    // Include already-cancelled items in the denominator — they were part of the original order total
+    const originalOrderTotal = order.vendorSubOrders
+      .flatMap(so => so.items)
+      .reduce((acc, i) => acc + i.pricePerItem * i.quantity, 0);
+
+    const itemTotal = lineItem.pricePerItem * lineItem.quantity;
+    const promoShare = originalOrderTotal > 0
+      ? (itemTotal / originalOrderTotal) * (order.promoDiscount || 0)
+      : 0;
+
+    const refundedAmount = Math.round((itemTotal - promoShare) * 100) / 100;
 
     const product = database.getProductById(productId);
     if (product) {
@@ -408,7 +433,8 @@ export const mockApi = {
     subOrder.status = deriveSubOrderStatus(subOrder.items);
 
     const newGrandTotal = order.vendorSubOrders.reduce((acc, curr) => acc + curr.subTotal, 0);
-    order.grandTotal = Math.round(newGrandTotal * 100) / 100;
+    const remainingPromo = (order.promoDiscount || 0) - promoShare;
+    order.grandTotal = Math.round((newGrandTotal - remainingPromo) * 100) / 100;
 
     database.saveOrder(order);
 
@@ -437,6 +463,20 @@ export const mockApi = {
       throw new Error('Vendor sub-order not found.');
     }
 
+    // Validate: throw before touching any item if any active item is in transit
+    for (const item of subOrder.items) {
+      if (item.status === 'Shipped') {
+        throw new Error(
+          'One or more items have already been shipped and cannot be cancelled. ' +
+          'Please request a return once they are delivered.'
+        );
+      }
+    }
+
+    const originalOrderTotal = order.vendorSubOrders
+      .flatMap(so => so.items)
+      .reduce((acc, i) => acc + i.pricePerItem * i.quantity, 0);
+
     let refundedAmount = 0;
     let anyDelivered = false;
 
@@ -445,8 +485,13 @@ export const mockApi = {
         const wasDelivered = item.status === 'Delivered';
         if (wasDelivered) anyDelivered = true;
         item.status = wasDelivered ? 'Returned' : 'Cancelled';
-        refundedAmount += item.pricePerItem * item.quantity;
-        
+
+        const itemTotal = item.pricePerItem * item.quantity;
+        const promoShare = originalOrderTotal > 0
+          ? (itemTotal / originalOrderTotal) * (order.promoDiscount || 0)
+          : 0;
+        refundedAmount += itemTotal - promoShare;
+
         const product = database.getProductById(item.productId);
         if (product) {
           database.updateProductStock(item.productId, product.stockCount + item.quantity);
@@ -480,6 +525,22 @@ export const mockApi = {
       throw new Error('Order not found.');
     }
 
+    // Validate all sub-orders before touching anything
+    for (const subOrder of order.vendorSubOrders) {
+      for (const item of subOrder.items) {
+        if (item.status === 'Shipped') {
+          throw new Error(
+            'One or more items have already been shipped and cannot be cancelled. ' +
+            'Please request a return once they are delivered.'
+          );
+        }
+      }
+    }
+
+    const originalOrderTotal = order.vendorSubOrders
+      .flatMap(so => so.items)
+      .reduce((acc, i) => acc + i.pricePerItem * i.quantity, 0);
+
     let refundedAmount = 0;
 
     for (const subOrder of order.vendorSubOrders) {
@@ -489,7 +550,12 @@ export const mockApi = {
           const wasDelivered = item.status === 'Delivered';
           if (wasDelivered) anyDelivered = true;
           item.status = wasDelivered ? 'Returned' : 'Cancelled';
-          refundedAmount += item.pricePerItem * item.quantity;
+
+          const itemTotal = item.pricePerItem * item.quantity;
+          const promoShare = originalOrderTotal > 0
+            ? (itemTotal / originalOrderTotal) * (order.promoDiscount || 0)
+            : 0;
+          refundedAmount += itemTotal - promoShare;
 
           const product = database.getProductById(item.productId);
           if (product) {

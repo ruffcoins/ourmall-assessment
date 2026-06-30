@@ -124,6 +124,16 @@ export function OrderDetailsScreen({ orderId }: OrderDetailsScreenProps) {
               {vm.getPriceText(vm.order.grandTotal)}
             </Typography>
           </View>
+          {vm.order.promoDiscount > 0 && (
+            <View className="flex-row justify-between items-center mt-2 pt-2" style={{ borderTopColor: colors.borderSubtle, borderTopWidth: 1 }}>
+              <Typography style={{ color: colors.textMuted }} className="text-[10px] font-geologica">
+                Promo discount (WELCOME10)
+              </Typography>
+              <Typography style={{ color: colors.success }} className="text-[10px] font-geologica-semibold">
+                -{vm.getPriceText(vm.order.promoDiscount)}
+              </Typography>
+            </View>
+          )}
         </View>
 
         {/* Vendor Sub Orders */}

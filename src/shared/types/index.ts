@@ -77,6 +77,7 @@ export interface MasterOrder {
   currency: Currency;
   vendorSubOrders: VendorSubOrder[];
   grandTotal: number;
+  promoDiscount: number;
   createdAt: string;
 }
 

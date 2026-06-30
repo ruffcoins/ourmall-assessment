@@ -10,7 +10,7 @@ export function useOrderDetailsViewModel(orderId: string) {
   const getPriceText = (price: number) =>
     new Intl.NumberFormat('en-US', {
       style: 'currency',
-      currency: activeCurrency,
+      currency: order?.currency ?? activeCurrency,
     }).format(price);
 
   const handleCancelItem = (vendorId: string, productId: string) => {

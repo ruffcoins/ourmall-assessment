@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback } from 'react';
 import { useRouter } from 'expo-router';
-import { useStore, mockApi, convertPrice, database } from '../../../shared';
+import { useStore, mockApi, convertPrice, database, PROMO_CODES } from '../../../shared';
 
 export function useCartViewModel() {
   const { 
@@ -157,8 +157,9 @@ export function useCartViewModel() {
   const cartSubtotal = vendorGroupsList.reduce((sum, g) => sum + g.subtotal, 0);
   const productDiscounts = vendorGroupsList.reduce((sum, g) => sum + g.discount, 0);
   
-  const promoDiscountValue = appliedPromo === 'WELCOME10'
-    ? convertPrice(10, activeCurrency, 'EUR')
+  const prePromoTotal = cartSubtotal - productDiscounts;
+  const promoDiscountValue = appliedPromo === PROMO_CODES.WELCOME10.code
+    ? Math.round(prePromoTotal * (PROMO_CODES.WELCOME10.discountPercent / 100) * 100) / 100
     : 0;
 
   const cartTotal = Math.max(0, cartSubtotal - productDiscounts - promoDiscountValue);
@@ -171,8 +172,8 @@ export function useCartViewModel() {
   };
 
   const applyPromo = (code: string): boolean => {
-    if (code.trim().toUpperCase() === 'WELCOME10') {
-      setAppliedPromo('WELCOME10');
+    if (code.trim().toUpperCase() === PROMO_CODES.WELCOME10.code) {
+      setAppliedPromo(PROMO_CODES.WELCOME10.code);
       return true;
     }
     return false;

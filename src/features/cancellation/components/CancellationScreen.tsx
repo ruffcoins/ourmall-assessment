@@ -100,6 +100,15 @@ export function CancellationScreen({ orderId, vendorId, productId }: Cancellatio
             </View>
           )}
 
+          {vm.refundDetails.hasPromoDeduction && (
+            <View className="flex-row justify-between items-center mb-3">
+              <Typography style={{ color: colors.textSecondary }} className="text-xs font-geologica">Promo deduction (WELCOME10)</Typography>
+              <Typography style={{ color: colors.error }} className="text-xs font-geologica-semibold">
+                -{vm.refundDetails.promoDeductionText}
+              </Typography>
+            </View>
+          )}
+
           <View style={{ backgroundColor: colors.border, height: 1 }} className="my-2" />
 
           <View className="flex-row justify-between items-center mt-2">

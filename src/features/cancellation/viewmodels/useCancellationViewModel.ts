@@ -22,12 +22,19 @@ export function useCancellationViewModel(
   let refundNum = 0;
   let priceNum = 0;
   let discountNum = 0;
+  let promoShare = 0;
 
   if (order && lineItem) {
-    refundNum = lineItem.pricePerItem * lineItem.quantity;
-    const basePriceConverted = lineItem.originalPrice;
-    priceNum = basePriceConverted * lineItem.quantity;
-    discountNum = Math.max(0, priceNum - refundNum);
+    const originalOrderTotal = order.vendorSubOrders
+      .flatMap(so => so.items)
+      .reduce((acc, i) => acc + i.pricePerItem * i.quantity, 0);
+    const itemTotal = lineItem.pricePerItem * lineItem.quantity;
+    promoShare = originalOrderTotal > 0
+      ? Math.round((itemTotal / originalOrderTotal) * (order.promoDiscount || 0) * 100) / 100
+      : 0;
+    refundNum = Math.round((itemTotal - promoShare) * 100) / 100;
+    priceNum = lineItem.originalPrice * lineItem.quantity;
+    discountNum = Math.max(0, priceNum - itemTotal);
   }
 
   const formatVal = (num: number) =>
@@ -40,6 +47,8 @@ export function useCancellationViewModel(
     priceText: formatVal(priceNum),
     hasDiscount: discountNum > 0,
     discountText: formatVal(discountNum),
+    hasPromoDeduction: promoShare > 0,
+    promoDeductionText: formatVal(promoShare),
     refundText: formatVal(refundNum),
   };
 

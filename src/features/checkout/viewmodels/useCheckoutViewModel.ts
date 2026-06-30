@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import { useRouter } from 'expo-router';
-import { useStore, mockApi, convertPrice } from '../../../shared';
+import { useStore, mockApi, convertPrice, PROMO_CODES } from '../../../shared';
 
 export function useCheckoutViewModel() {
   const { 
@@ -69,8 +69,9 @@ export function useCheckoutViewModel() {
   const cartSubtotal = vendorGroupsList.reduce((sum, g) => sum + g.subtotal, 0);
   const productDiscounts = vendorGroupsList.reduce((sum, g) => sum + g.discount, 0);
   
-  const promoDiscountValue = appliedPromo === 'WELCOME10'
-    ? convertPrice(10, activeCurrency, 'EUR')
+  const prePromoTotal = cartSubtotal - productDiscounts;
+  const promoDiscountValue = appliedPromo === PROMO_CODES.WELCOME10.code
+    ? Math.round(prePromoTotal * (PROMO_CODES.WELCOME10.discountPercent / 100) * 100) / 100
     : 0;
 
   const cartTotal = Math.max(0, cartSubtotal - productDiscounts - promoDiscountValue);
@@ -95,12 +96,12 @@ export function useCheckoutViewModel() {
       }));
 
       const userId = 'USER-123';
-      const order = await mockApi.checkout(userId, itemsToCheckout, activeCurrency);
-      
-      // Apply the promo discount directly to the master order grandTotal
-      if (appliedPromo === 'WELCOME10') {
-        order.grandTotal = Math.max(0, order.grandTotal - promoDiscountValue);
-      }
+      const order = await mockApi.checkout(
+        userId,
+        itemsToCheckout,
+        activeCurrency,
+        appliedPromo ?? undefined
+      );
 
       // Store the master order globally
       addOrder(order);
